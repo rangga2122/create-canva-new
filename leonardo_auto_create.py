@@ -94,6 +94,24 @@ ETTEUM_PORT = int(os.getenv("ETTEUM_PORT", "1930"))
 ETTEUM_API_KEY = os.getenv("ETTEUM_API_KEY", "Nr201105")
 ETTEUM_API_URL = f"http://{ETTEUM_HOST}:{ETTEUM_PORT}/api/accounts"
 ETTEUM_HTTPS_URL = os.getenv("ETTEUM_HTTPS_URL", f"https://etteum.azkazamdigital.com/api/accounts")
+
+# ════════════════════════════════════════════════════════
+# TempMail API config (mail.digitalku.store)
+# ════════════════════════════════════════════════════════
+TEMP_MAIL_BASE_URL = "https://mail.digitalku.store"
+TEMP_MAIL_VOUCHER_CODES = [
+    code.strip()
+    for code in os.getenv("TEMP_MAIL_VOUCHER_CODES", "Z1R4Y7,Z1R4Y7").split(",")
+    if code.strip()
+]
+TEMP_MAIL_PREFERRED_DOMAINS = [
+    domain.strip()
+    for domain in os.getenv(
+        "TEMP_MAIL_DOMAINS",
+        "atlaz.tech,redmail.tech,digitalku.tech,mailserver.biz.id,zoro.biz.id,asuraimu.eu.cc",
+    ).split(",")
+    if domain.strip()
+]
 CANVA_ACCOUNTS_FILE = SCRIPT_DIR / "canva_accounts.json"
 CANVA_ACCOUNTS_DIR = SCRIPT_DIR / "canva_accounts"
 CANVA_ACCOUNTS_DIR.mkdir(exist_ok=True)
@@ -1239,6 +1257,219 @@ async def reset_leonardo_session(browser):
     logger.ok("Leonardo cookies/storage reset done")
 
 
+# ════════════════════════════════════════════════════════
+# TempMail API helpers (from leonardo-reverse, proven working)
+# ════════════════════════════════════════════════════════
+import secrets
+import string
+
+
+def _random_temp_username(prefix="leo"):
+    suffix = "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(9))
+    return f"{prefix}{suffix}"
+
+
+def _extract_strings(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        out = []
+        for item in value.values():
+            out.extend(_extract_strings(item))
+        return out
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            out.extend(_extract_strings(item))
+        return out
+    return [str(value)]
+
+
+def extract_otp_from_temp_mail_response(payload):
+    """Extract a 6-digit Canva OTP from TempMail mailbox payload."""
+    emails = []
+    if isinstance(payload, dict):
+        raw_emails = payload.get("emails") or payload.get("data") or payload.get("messages") or []
+        if isinstance(raw_emails, list):
+            emails = raw_emails
+    elif isinstance(payload, list):
+        emails = payload
+
+    def item_time(item):
+        if not isinstance(item, dict):
+            return ""
+        for key in ("createdAt", "created_at", "receivedAt", "received_at", "date", "time", "timestamp"):
+            value = item.get(key)
+            if value:
+                return str(value)
+        return str(item.get("id") or item.get("_id") or "")
+
+    def extract_canva_code(text):
+        patterns = [
+            r"kode\s+canva(?:\s+anda)?\s+(?:adalah|:)?\s*(\d{6})",
+            r"masukkan\s+(\d{6})",
+            r"(?:verification|security|login)\s+code\s+(?:is|:)?\s*(\d{6})",
+            r"\b(\d{6})\b(?=[^\n\r]{0,80}(?:menit|minute|canva))",
+        ]
+        lower_text = text.lower()
+        for pattern in patterns:
+            match = re.search(pattern, lower_text, flags=re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return None
+
+    search_items = sorted(emails, key=item_time, reverse=True) if emails else [payload]
+    for item in search_items:
+        text = "\n".join(_extract_strings(item))
+        lower = text.lower()
+        if "canva" not in lower and "kode" not in lower and "code" not in lower:
+            continue
+        otp = extract_canva_code(text)
+        if otp:
+            return otp, item
+
+    all_text = "\n".join(_extract_strings(payload))
+    otp = extract_canva_code(all_text)
+    if otp:
+        return otp, None
+    return None, None
+
+
+async def fetch_temp_mail_domains(client):
+    response = await client.get(f"{TEMP_MAIL_BASE_URL}/api/domains")
+    response.raise_for_status()
+    data = response.json()
+    domains = data.get("domains") if isinstance(data, dict) else data
+    if not isinstance(domains, list):
+        raise RuntimeError("TempMail domains response invalid")
+    return domains
+
+
+async def generate_temp_mail_email():
+    """Generate a TempMail address through mail.digitalku.store REST API."""
+    async with httpx.AsyncClient(timeout=30, verify=False) as client:
+        domains = await fetch_temp_mail_domains(client)
+        by_name = {str(domain.get("name")): domain for domain in domains if domain.get("name")}
+        ordered = [by_name[name] for name in TEMP_MAIL_PREFERRED_DOMAINS if name in by_name]
+        ordered.extend(
+            domain for domain in domains
+            if domain.get("status") == "active" and domain not in ordered and not domain.get("is_hidden")
+        )
+
+        if not ordered:
+            raise RuntimeError("Tidak ada domain TempMail aktif")
+
+        last_error = None
+        for domain_info in ordered:
+            domain = domain_info.get("name")
+            zone_id = domain_info.get("id") or ""
+            is_premium = bool(domain_info.get("is_premium"))
+            voucher_candidates = TEMP_MAIL_VOUCHER_CODES if is_premium else [""]
+            if not voucher_candidates:
+                continue
+
+            for voucher_code in voucher_candidates:
+                username = _random_temp_username()
+                email_domain = domain
+                base_payload = {
+                    "username": username,
+                    "domain": domain,
+                    "zoneId": zone_id,
+                    "emailDomain": email_domain,
+                }
+                try:
+                    check_res = await client.post(
+                        f"{TEMP_MAIL_BASE_URL}/api/check-username",
+                        json=base_payload,
+                    )
+                    if check_res.status_code == 200:
+                        check_data = check_res.json()
+                        if isinstance(check_data, dict) and check_data.get("available") is False:
+                            logger.warn(f"TempMail username unavailable: {username}@{email_domain}")
+                            continue
+
+                    generate_payload = {
+                        **base_payload,
+                        "password": None,
+                        "voucherCode": voucher_code,
+                    }
+                    generate_res = await client.post(
+                        f"{TEMP_MAIL_BASE_URL}/api/generate",
+                        json=generate_payload,
+                    )
+                    data = generate_res.json()
+                    if generate_res.status_code == 200 and isinstance(data, dict) and data.get("success") and data.get("email"):
+                        email = data["email"]
+                        logger.ok(f"TempMail generated: {email}")
+                        return {
+                            "email": email,
+                            "domain": domain,
+                            "zone_id": zone_id,
+                            "is_premium": is_premium,
+                            "voucher_used": bool(voucher_code),
+                            "raw": data,
+                        }
+                    last_error = data.get("error") if isinstance(data, dict) else str(data)
+                    logger.warn(f"TempMail generate failed for {domain}: {last_error}")
+                except Exception as e:
+                    last_error = str(e)
+                    logger.warn(f"TempMail generate skipped for {domain}: {e}")
+
+        raise RuntimeError(f"TempMail generate failed: {last_error or 'no usable domain'}")
+
+
+async def wait_for_temp_mail_otp(email, timeout=150, interval=5):
+    """Poll TempMail inbox until a Canva OTP is found."""
+    deadline = time.time() + timeout
+    last_payload = None
+    async with httpx.AsyncClient(timeout=30, verify=False) as client:
+        while time.time() < deadline:
+            response = await client.post(
+                f"{TEMP_MAIL_BASE_URL}/api/mailbox/fetch",
+                json={"email": email},
+            )
+            data = response.json()
+            last_payload = data
+            otp, message = extract_otp_from_temp_mail_response(data)
+            if otp:
+                await asyncio.sleep(4)
+                try:
+                    confirm_response = await client.post(
+                        f"{TEMP_MAIL_BASE_URL}/api/mailbox/fetch",
+                        json={"email": email},
+                    )
+                    confirm_data = confirm_response.json()
+                    confirm_otp, confirm_message = extract_otp_from_temp_mail_response(confirm_data)
+                    if confirm_otp and confirm_otp != otp:
+                        logger.warn(f"TempMail OTP updated from {otp} to {confirm_otp}; using latest code")
+                        otp = confirm_otp
+                        data = confirm_data
+                        message = confirm_message
+                except Exception as e:
+                    logger.warn(f"TempMail OTP confirm fetch skipped: {e}")
+
+                message_id = None
+                if isinstance(message, dict):
+                    message_id = message.get("id") or message.get("_id") or message.get("uid")
+                if message_id:
+                    try:
+                        await client.post(
+                            f"{TEMP_MAIL_BASE_URL}/api/mailbox/delete",
+                            json={"email": email, "id": message_id},
+                        )
+                    except Exception as e:
+                        logger.warn(f"TempMail delete email skipped: {e}")
+                return otp, data
+
+            count = data.get("count") if isinstance(data, dict) else None
+            logger.info(f"TempMail inbox belum ada OTP ({count if count is not None else 0} email), retry {interval}s...")
+            await asyncio.sleep(interval)
+
+    raise RuntimeError(f"OTP TempMail tidak masuk dalam {timeout}s. Last payload: {str(last_payload)[:200]}")
+
+
 async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=True, email_provider="relay"):
     """
     Full automated flow:
@@ -1354,17 +1585,19 @@ async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=
         elif email_provider == "tempmail":
             # ════════════════════════════════════════════════════════
             # TEMPMAIL MODE — Generate email via mail.digitalku.store API
+            # (menggunakan implementasi asli dari leonardo-reverse)
             # ════════════════════════════════════════════════════════
             try:
-                from tempmail_client import generate_email as tempmail_generate
-                logger.info("Generating email via TempMail API...")
-                result = tempmail_generate()
-                if not result.get("success"):
-                    raise RuntimeError(f"TempMail generate failed: {result.get('error')}")
-                temp_email = result["email"]
-                captured["email"] = temp_email
-                logger.ok(f"TempMail email: {temp_email}")
-                results.append({"desc": "TempMail email", "status": "OK", "data": temp_email})
+                logger.info(f"Generating email via {TEMP_MAIL_BASE_URL}...")
+                temp_mail = await generate_temp_mail_email()
+                captured["email"] = temp_mail["email"]
+                captured["temp_mail"] = temp_mail
+                logger.ok(f"TempMail email: {captured['email']}")
+                logger.info(
+                    f"TempMail domain: {temp_mail.get('domain')} "
+                    f"({'premium' if temp_mail.get('is_premium') else 'standard'})"
+                )
+                results.append({"desc": "TempMail email", "status": "OK", "data": captured["email"]})
             except Exception as e:
                 logger.error(f"TempMail generate failed: {e}")
                 results.append({"desc": "TempMail email", "status": "FAIL", "data": str(e)[:50]})
@@ -1491,22 +1724,14 @@ async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=
         if email_provider == "tempmail" and not relay_email:
             # ════════════════════════════════════════════════════════
             # TEMPMAIL MODE — Get OTP via mail.digitalku.store API
+            # (menggunakan implementasi asli dari leonardo-reverse)
             # ════════════════════════════════════════════════════════
             try:
-                from tempmail_client import wait_for_otp as tempmail_wait_for_otp
-                logger.info(f"Waiting for OTP via TempMail API (timeout: 150s)...")
-                otp_code = tempmail_wait_for_otp(
-                    captured["email"],
-                    timeout=150,
-                    poll_interval=5,
-                    sender_filter="canva",
-                )
-                if otp_code:
-                    logger.ok(f"TempMail OTP: {otp_code}")
-                    results.append({"desc": "TempMail OTP", "status": "OK", "data": otp_code})
-                else:
-                    logger.error("TempMail OTP timeout - no OTP received")
-                    results.append({"desc": "TempMail OTP", "status": "FAIL", "data": "timeout"})
+                logger.info(f"Polling TempMail inbox: {captured.get('email')}")
+                otp_code, otp_payload = await wait_for_temp_mail_otp(captured["email"], timeout=150, interval=5)
+                logger.ok(f"TempMail OTP: {otp_code}")
+                captured["temp_mail_last_inbox"] = otp_payload
+                results.append({"desc": "TempMail OTP", "status": "OK", "data": otp_code})
             except Exception as e:
                 logger.error(f"TempMail OTP failed: {e}")
                 results.append({"desc": "TempMail OTP", "status": "FAIL", "data": str(e)[:50]})

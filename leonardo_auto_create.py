@@ -1950,6 +1950,110 @@ async def refresh_leonardo_credit_once(page, captured, ephemeral_token=None):
     return ephemeral_token
 
 
+async def generate_via_browser_ui(page, prompt="pemandangan indah", timeout=30):
+    """Generate image via Leonardo browser UI dengan selector spesifik.
+
+    Selector:
+    - Input prompt: #prompt-textarea
+    - Tombol Generate: [aria-label="Generate"]
+
+    Returns True jika prompt diisi + tombol Generate diklik.
+    """
+    if not page or page.is_closed():
+        logger.warn("Page tertutup, tidak bisa generate via UI")
+        return False
+
+    try:
+        logger.info(f"Navigasi ke Leonardo image-generation...")
+        await page.goto("https://app.leonardo.ai/image-generation", wait_until="domcontentloaded", timeout=25000)
+        await asyncio.sleep(5)
+
+        # === INPUT PROMPT ===
+        logger.info(f"Mencari selector #prompt-textarea...")
+        prompt_selector = "#prompt-textarea"
+        try:
+            prompt_loc = page.locator(prompt_selector).first
+            await prompt_loc.wait_for(state="visible", timeout=15000)
+            logger.ok(f"Selector #prompt-textarea ditemukan")
+
+            # Click + clear + type
+            await prompt_loc.click()
+            await asyncio.sleep(0.5)
+            await prompt_loc.fill("")
+            await asyncio.sleep(0.3)
+            await prompt_loc.type(prompt, delay=30)
+            await asyncio.sleep(1)
+            logger.ok(f"Prompt diisi: '{prompt}'")
+        except Exception as e:
+            logger.warn(f"Selector #prompt-textarea tidak ditemukan: {e}")
+            # Fallback: cari textarea visible lain
+            try:
+                fallback = page.locator("textarea").first
+                await fallback.wait_for(state="visible", timeout=5000)
+                await fallback.click()
+                await fallback.fill("")
+                await fallback.type(prompt, delay=30)
+                await asyncio.sleep(1)
+                logger.ok(f"Prompt diisi via fallback textarea: '{prompt}'")
+            except Exception as e2:
+                logger.error(f"Fallback textarea juga gagal: {e2}")
+                return False
+
+        # === KLIK GENERATE ===
+        logger.info(f"Mencari tombol [aria-label='Generate']...")
+        generate_selector = '[aria-label="Generate"]'
+        try:
+            gen_btn = page.locator(generate_selector).first
+            await gen_btn.wait_for(state="visible", timeout=10000)
+
+            # Cek disabled
+            is_disabled = await gen_btn.get_attribute("disabled")
+            aria_disabled = await gen_btn.get_attribute("aria-disabled")
+            if is_disabled is not None or aria_disabled == "true":
+                logger.warn(f"Tombol Generate disabled, tunggu 3s lalu retry...")
+                await asyncio.sleep(3)
+                # Coba klik pakai force
+                try:
+                    await gen_btn.click(force=True, timeout=5000)
+                    logger.ok("Tombol Generate diklik (force)")
+                    await asyncio.sleep(3)
+                    return True
+                except Exception:
+                    logger.error("Tombol Generate masih disabled")
+                    return False
+
+            await gen_btn.click(timeout=5000)
+            logger.ok("Tombol Generate diklik!")
+            await asyncio.sleep(3)
+            return True
+
+        except Exception as e:
+            logger.warn(f"Selector [aria-label='Generate'] tidak ditemukan: {e}")
+            # Fallback: cari button dengan text "Generate"
+            try:
+                buttons = page.locator('button, [role="button"]')
+                count = await buttons.count()
+                for i in range(count):
+                    btn = buttons.nth(i)
+                    text = (await btn.inner_text() or "").strip().lower()
+                    if "generate" in text or "buat" in text:
+                        rect = await btn.bounding_box()
+                        if rect and rect["width"] > 60 and rect["height"] > 25:
+                            await btn.click(timeout=5000)
+                            logger.ok(f"Tombol Generate diklik via fallback text: '{text}'")
+                            await asyncio.sleep(3)
+                            return True
+                logger.error("Tombol Generate tidak ditemukan di semua fallback")
+                return False
+            except Exception as e2:
+                logger.error(f"Fallback button text juga gagal: {e2}")
+                return False
+
+    except Exception as e:
+        logger.error(f"Generate via browser UI gagal: {type(e).__name__}: {e}")
+        return False
+
+
 async def ensure_leonardo_credit_spent(page, captured, full_credit=8500, timeout=120):
     """Generate 1x gambar lalu tunggu credit berkurang. Pakai API langsung."""
     if has_credit_spend_verified(captured, full_credit=full_credit):
@@ -1957,12 +2061,15 @@ async def ensure_leonardo_credit_spent(page, captured, full_credit=8500, timeout
         logger.ok(f"Credit sudah berkurang: {captured.get('credit_balance')}")
         return True
 
-    logger.warn(f"Credit masih full ({captured.get('credit_balance')}); menjalankan generate via API...")
-    await trigger_leonardo_generation_request(page, captured)
+    logger.warn(f"Credit masih full ({captured.get('credit_balance')}); menjalankan generate via BROWSER UI...")
+    ui_ok = await generate_via_browser_ui(page, prompt="pemandangan indah")
+    if not ui_ok:
+        logger.warn("Generate via browser UI gagal, fallback ke API...")
+        await trigger_leonardo_generation_request(page, captured)
 
     # Tunggu credit berkurang dengan interval lebih cepat
     deadline = time.time() + timeout
-    retry_interval = 10  # retry generate setiap 10s (bukan 20s)
+    retry_interval = 15  # retry generate setiap 15s
     last_retry = time.time()
     while time.time() < deadline:
         # Cek credit via API langsung (lebih cepat dari browser)
@@ -1974,11 +2081,15 @@ async def ensure_leonardo_credit_spent(page, captured, full_credit=8500, timeout
             return True
 
         if time.time() - last_retry >= retry_interval:
-            logger.info(f"Credit belum berkurang ({captured.get('credit_balance')}), retry generate...")
-            await trigger_leonardo_generation_request(page, captured)
+            logger.info(f"Credit belum berkurang ({captured.get('credit_balance')}), retry generate via browser UI...")
+            ui_ok = await generate_via_browser_ui(page, prompt="pemandangan indah")
+            if not ui_ok:
+                logger.info("Retry via API fallback...")
+                await trigger_leonardo_generation_request(page, captured)
             last_retry = time.time()
         else:
-            logger.info(f"Credit belum berkurang ({captured.get('credit_balance')}), tunggu 3s...")
+            logger.info(f"Credit belum berkurang ({captured.get('credit_balance')}), tunggu 5s...")
+        await asyncio.sleep(5)
         await asyncio.sleep(3)  # tunggu 3s (bukan 5s)
 
     captured["credit_spend_verified"] = False
@@ -2630,12 +2741,8 @@ async def auto_create_account(
 
             print_summary(results)
 
-            if google_sheet_webhook_url and has_credit_spend_verified(captured, full_credit=8500):
-                await send_account_to_google_sheet(captured, google_sheet_webhook_url)
-            elif google_sheet_webhook_url:
-                logger.warn("Google Sheet not sent because credit has not decreased from 8500")
-            else:
-                logger.info("Google Sheet URL kosong; akun tidak dikirim")
+            # Google Sheet dikirim via Eteum Pool (tidak perlu kirim terpisah)
+            logger.info("Akun akan disimpan ke Eteum Pool + lokal PC")
 
             return captured, results
 
@@ -2876,8 +2983,9 @@ async def auto_create_account(
     if export_ready and upload_account_json and saved_record:
         await upload_account_json_to_server(saved_record, account_server_url or DEFAULT_ACCOUNT_SERVER_URL)
 
-    if export_ready and saved_record and google_sheet_webhook_url:
-        await send_account_to_google_sheet(saved_record, google_sheet_webhook_url)
+    # Google Sheet dikirim via Eteum Pool (tidak perlu kirim terpisah)
+    # if export_ready and saved_record and google_sheet_webhook_url:
+    #     await send_account_to_google_sheet(saved_record, google_sheet_webhook_url)
 
     # ══════════════════════════════════════════════════════════
     # ETTEUM POOL: Import akun Canva + simpan lokal PC

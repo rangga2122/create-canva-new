@@ -67,6 +67,8 @@ class LeonardoGUI(ctk.CTk):
         
         # State
         self.running = False
+        self.browser_running = False
+        self.installing = False
         self.log_thread = None
         self.captured_data = None
         
@@ -248,6 +250,32 @@ class LeonardoGUI(ctk.CTk):
         footer_frame = ctk.CTkFrame(self, fg_color="transparent")
         footer_frame.pack(fill="x", padx=20, pady=(5, 20))
         
+        self.install_btn = ctk.CTkButton(
+            footer_frame,
+            text="📦  INSTALL",
+            font=("Segoe UI", 13, "bold"),
+            fg_color="#2d4a22",
+            hover_color="#3d6a2e",
+            text_color=COLOR_TEXT,
+            height=45,
+            corner_radius=12,
+            command=self.on_install
+        )
+        self.install_btn.pack(side="left", fill="x", expand=True, padx=(0, 10))
+
+        self.browser_btn = ctk.CTkButton(
+            footer_frame,
+            text="🌐  BUKA BROWSER",
+            font=("Segoe UI", 13, "bold"),
+            fg_color=COLOR_ACCENT,
+            hover_color=COLOR_HIGHLIGHT,
+            text_color=COLOR_TEXT,
+            height=45,
+            corner_radius=12,
+            command=self.on_open_browser
+        )
+        self.browser_btn.pack(side="left", fill="x", expand=True, padx=(0, 10))
+
         self.start_btn = ctk.CTkButton(
             footer_frame,
             text="▶  MULAI",
@@ -335,9 +363,199 @@ class LeonardoGUI(ctk.CTk):
         else:
             indicator.configure(text_color=COLOR_ERROR, fg_color="#3d0a1a")
             
+    def on_install(self):
+        """Install semua dependencies yang dibutuhkan"""
+        if self.installing or self.running or self.browser_running:
+            self.log("Tunggu proses lain selesai dulu!", "warn")
+            return
+
+        self.installing = True
+        self.install_btn.configure(state="disabled", text="\u23f3  INSTALLING...")
+        self.browser_btn.configure(state="disabled")
+        self.start_btn.configure(state="disabled")
+        self.log("Memulai instalasi dependencies...", "step")
+        self.log("Ini akan install: playwright, httpx, rich, customtkinter, requests", "info")
+        self.log("Plus download Chromium browser untuk Playwright", "info")
+        self.log("Mohon tunggu, proses ini bisa 2-5 menit...", "info")
+
+        thread = threading.Thread(target=self._run_install, daemon=True)
+        thread.start()
+
+    def _run_install(self):
+        """Run installation in background thread"""
+        import subprocess
+        import sys
+        import os
+
+        def run_cmd(cmd, desc):
+            self.after(0, lambda d=desc: self.log(f"\u25b6 {d}", "step"))
+            try:
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    cwd=str(SCRIPT_DIR),
+                )
+                for line in process.stdout:
+                    line = line.strip()
+                    if line:
+                        self.after(0, lambda l=line: self.log(f"  {l}", "info"))
+                process.wait()
+                if process.returncode == 0:
+                    self.after(0, lambda d=desc: self.log(f"\u2705 {d} - OK", "ok"))
+                    return True
+                else:
+                    self.after(0, lambda d=desc, rc=process.returncode: self.log(f"\u274c {d} - FAIL (exit {rc})", "error"))
+                    return False
+            except Exception as e:
+                self.after(0, lambda d=desc, e=str(e): self.log(f"\u274c {d} - ERROR: {e}", "error"))
+                return False
+
+        # Step 1: Cek pip
+        ok = run_cmd([sys.executable, "-m", "pip", "--version"], "Cek pip")
+        if not ok:
+            self.after(0, lambda: self.log("pip tidak ditemukan! Install Python dulu.", "error"))
+            self.after(0, self._on_install_complete)
+            return
+
+        # Step 2: Upgrade pip
+        run_cmd([sys.executable, "-m", "pip", "install", "--upgrade", "pip"], "Upgrade pip")
+
+        # Step 3: Install requirements.txt
+        req_file = SCRIPT_DIR / "requirements.txt"
+        if req_file.exists():
+            ok = run_cmd([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], "Install requirements.txt")
+            if not ok:
+                # Fallback: install manual
+                self.after(0, lambda: self.log("Fallback: install manual package...", "warn"))
+                run_cmd([sys.executable, "-m", "pip", "install", "playwright>=1.40", "httpx>=0.25", "rich>=13.0", "customtkinter>=5.2", "requests>=2.28"], "Install packages manual")
+        else:
+            run_cmd([sys.executable, "-m", "pip", "install", "playwright>=1.40", "httpx>=0.25", "rich>=13.0", "customtkinter>=5.2", "requests>=2.28"], "Install packages")
+
+        # Step 4: Install Chromium untuk Playwright
+        run_cmd([sys.executable, "-m", "playwright", "install", "chromium"], "Download Chromium browser")
+
+        # Step 5: Install deps sistem (Linux only)
+        if os.name != "nt":
+            run_cmd([sys.executable, "-m", "playwright", "install-deps", "chromium"], "Install system deps (Linux)")
+
+        # Step 6: Verify
+        self.after(0, lambda: self.log("Verifikasi install...", "step"))
+        verify_ok = True
+        for pkg in ["playwright", "httpx", "rich", "customtkinter", "requests"]:
+            try:
+                __import__(pkg)
+                self.after(0, lambda p=pkg: self.log(f"  \u2705 {p}", "ok"))
+            except ImportError:
+                self.after(0, lambda p=pkg: self.log(f"  \u274c {p} - TIDAK TERINSTALL", "error"))
+                verify_ok = False
+
+        if verify_ok:
+            self.after(0, lambda: self.log("\n\U0001f389 INSTALL SELESAI! Semua siap dipakai.", "ok"))
+            self.after(0, lambda: self.log("Klik BUKA BROWSER untuk login, lalu MULAI.", "info"))
+        else:
+            self.after(0, lambda: self.log("\n\u26a0\ufe0f Beberapa package gagal. Coba install manual.", "warn"))
+
+        self.after(0, self._on_install_complete)
+
+    def _on_install_complete(self):
+        """Called when install completes"""
+        self.installing = False
+        self.install_btn.configure(state="normal", text="\U0001f4e6  INSTALL")
+        self.browser_btn.configure(state="normal")
+        self.start_btn.configure(state="normal")
+
+    def on_open_browser(self):
+        """Open browser for manual login (Gmail, Firefox Relay, Canva, dll)"""
+        if self.running or self.browser_running:
+            self.log("Browser sudah terbuka atau automation sedang berjalan!", "warn")
+            return
+
+        self.browser_running = True
+        self.browser_btn.configure(state="disabled", text="\u23f3  BROWSER TERBUKA...")
+        self.start_btn.configure(state="disabled")
+        self.log("Membuka browser untuk login manual...", "step")
+        self.log("Silakan login ke: Gmail, Firefox Relay, Canva, Leonardo, dll.", "info")
+        self.log("Tutup browser jika sudah selesai login.", "info")
+
+        thread = threading.Thread(target=self._run_browser, daemon=True)
+        thread.start()
+
+    def _run_browser(self):
+        """Run browser in background thread for manual login"""
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self._open_browser_async())
+            loop.close()
+        except Exception as e:
+            err_msg = str(e)
+            self.after(0, lambda msg=err_msg: self.log(f"Browser error: {msg}", "error"))
+        finally:
+            self.after(0, self._on_browser_closed)
+
+    async def _open_browser_async(self):
+        """Open Chromium with persistent profile for manual login"""
+        from playwright.async_api import async_playwright
+
+        browser_data = SCRIPT_DIR / "browser_profile"
+
+        async with async_playwright() as p:
+            self.after(0, lambda: self.log("Browser Chromium terbuka!", "ok"))
+
+            browser = await p.chromium.launch_persistent_context(
+                user_data_dir=str(browser_data),
+                headless=False,
+                viewport={"width": 1280, "height": 800},
+                locale="en-US",
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--lang=en-US",
+                ],
+            )
+
+            page = browser.pages[0] if browser.pages else await browser.new_page()
+
+            # Buka Gmail untuk login
+            await page.goto("https://accounts.google.com/", wait_until="domcontentloaded", timeout=30000)
+
+            self.after(0, lambda: self.log("Login ke Gmail dulu, lalu buka tab lain jika perlu.", "info"))
+            self.after(0, lambda: self.log("Setelah selesai, TUTUP browser untuk kembali ke app.", "info"))
+
+            # Tunggu sampai browser ditutup user
+            try:
+                await browser.wait_for_event("close", timeout=0)
+            except Exception:
+                while True:
+                    try:
+                        pages = browser.pages
+                        if not pages:
+                            break
+                        await asyncio.sleep(1)
+                    except Exception:
+                        break
+
+            try:
+                await browser.close()
+            except Exception:
+                pass
+
+    def _on_browser_closed(self):
+        """Called when manual browser is closed"""
+        self.browser_running = False
+        self.browser_btn.configure(state="normal", text="🌐  BUKA BROWSER")
+        self.start_btn.configure(state="normal")
+        self.log("Browser ditutup. Siap menjalankan automation!", "ok")
+
     def on_start(self):
         """Start the automation"""
         if self.running:
+            return
+        if self.browser_running:
+            self.log("Tutup browser manual dulu sebelum mulai automation!", "warn")
             return
             
         self.running = True
@@ -465,6 +683,8 @@ class LeonardoGUI(ctk.CTk):
         self.running = False
         self.start_btn.configure(state="normal")
         self.stop_btn.configure(state="disabled")
+        self.browser_btn.configure(state="normal")
+        self.install_btn.configure(state="normal")
         self.progress_bar.set(1.0)
         self.step_label.configure(text="✅ Selesai", text_color=COLOR_SUCCESS)
         

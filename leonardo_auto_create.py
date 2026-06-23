@@ -351,7 +351,8 @@ def extract_credit_balance(payload):
                         continue
                     total = 0
                     found_token_field = False
-                    for token_key in ["subscriptionTokens", "paidTokens", "rolloverTokens"]:
+                    # Include apiCredit — akun baru Leonardo pakai apiCredit (850), bukan subscription
+                    for token_key in ["subscriptionTokens", "paidTokens", "rolloverTokens", "apiCredit", "streamTokens"]:
                         number = as_number(detail.get(token_key))
                         if number is not None:
                             total += number
@@ -1912,6 +1913,11 @@ async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=
         # ════════════════════════════════════════════════════════════
         try:
             all_browser_cookies = await browser.cookies()
+            logger.info(f"Total browser cookies: {len(all_browser_cookies)}")
+            # Log semua domain unik untuk debug
+            domains = set((c.get("domain") or "").lower() for c in all_browser_cookies)
+            canva_domains = [d for d in domains if "canva" in d]
+            logger.info(f"Cookie domains: {len(domains)} total, Canva: {canva_domains or 'NONE'}")
             canva_tokens = extract_canva_cookies(all_browser_cookies)
             if canva_tokens:
                 captured["canva_tokens"] = canva_tokens
@@ -1987,16 +1993,38 @@ def extract_canva_cookies(browser_cookies):
     canva_keys = ["caz", "cb", "cau", "user_id", "cid", "cui", "cul", "cdi", "cs", "cl", "cf_clearance"]
     tokens = {}
     all_canva = []
+    canva_domains_found = set()
+    all_cookie_names = []
+
     for c in browser_cookies or []:
         domain = (c.get("domain") or "").lower()
+        name = c.get("name", "")
+        all_cookie_names.append(f"{name}@{domain}")
+        # Match berbagai format domain Canva: canva.com, .canva.com, www.canva.com
         if "canva.com" not in domain:
             continue
+        canva_domains_found.add(domain)
         all_canva.append(c)
-        name = c.get("name", "")
         if name in canva_keys:
             tokens[name] = c.get("value", "")
 
     tokens["all_cookies"] = all_canva
+
+    # Debug logging
+    if not tokens.get("caz"):
+        logger.warn(f"caz NOT found. Canva domains: {canva_domains_found or 'NONE'}")
+        logger.info(f"Total cookies: {len(browser_cookies or [])}, Canva cookies: {len(all_canva)}")
+        if all_canva:
+            canva_names = [c.get("name", "") for c in all_canva]
+            logger.info(f"Canva cookie names: {canva_names[:30]}")
+        else:
+            # Cari cookies dengan domain yang mungkin Canva tapi tidak match
+            maybe_canva = [n for n in all_cookie_names if "canva" in n.lower() or "caz" in n.lower()]
+            if maybe_canva:
+                logger.info(f"Maybe Canva cookies: {maybe_canva[:10]}")
+            else:
+                logger.info(f"Sample cookie names: {all_cookie_names[:15]}")
+
     return tokens if tokens.get("caz") else None
 
 
@@ -2235,21 +2263,30 @@ async def refresh_credit_via_api(captured):
             resp = await client.post(LEONARDO_GRAPHQL_URL, json=credit_query, headers=headers)
             if resp.status_code == 200:
                 data = resp.json()
+                logger.info(f"Credit API response: {str(data)[:400]}")
                 credits = extract_credit_balance(data) if "extract_credit_balance" in globals() else None
                 if credits is not None:
                     captured["credit_balance"] = credits
                     logger.ok(f"Saldo credit: {credits}")
                     return credits
-                # Manual extract jika fungsi tidak ada
+                # Manual extract — include apiCredit (akun baru pakai apiCredit)
                 users = (data.get("data") or {}).get("users") or []
                 if users:
                     details = users[0].get("user_details") or {}
-                    total = (details.get("subscriptionTokens") or 0) + (details.get("paidTokens") or 0) + (details.get("rolloverTokens") or 0) + (details.get("apiCredit") or 0)
+                    sub = details.get("subscriptionTokens") or 0
+                    paid = details.get("paidTokens") or 0
+                    roll = details.get("rolloverTokens") or 0
+                    api = details.get("apiCredit") or 0
+                    stream = details.get("streamTokens") or 0
+                    total = sub + paid + roll + api + stream
+                    logger.info(f"Credit breakdown: sub={sub} paid={paid} roll={roll} api={api} stream={stream} → total={total}")
                     captured["credit_balance"] = total
                     logger.ok(f"Saldo credit: {total}")
                     return total
+            else:
+                logger.warn(f"Credit API HTTP {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
-        logger.info(f"Cek credit via API gagal: {e}")
+        logger.warn(f"Cek credit via API gagal: {e}")
 
     return None
 

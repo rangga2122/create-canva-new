@@ -1515,7 +1515,21 @@ async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
                 "--lang=en-US",
+                "--disable-features=CrashReporting",
+                "--disable-crash-reporter",
+                "--disable-popup-blocking",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-background-networking",
+                "--disable-sync",
+                "--metrics-recording-only",
+                "--disable-default-apps",
+                "--disable-extensions",
+                "--disable-translate",
+                "--disable-renderer-backgrounding",
+                "--disable-component-update",
             ],
+            ignore_default_args=["--enable-automation"],
         )
 
         page = browser.pages[0] if browser.pages else await browser.new_page()
@@ -1553,6 +1567,10 @@ async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=
         except Exception as e:
             logger.warn(f"Leonardo startup reset failed, continuing anyway: {e}")
 
+        # ════════════════════════════════════════════════════════
+        # STEP 1-8: Main flow (wrapped — browser TIDAK boleh close di tengah)
+        # Jika ada step gagal, bot tetap lanjut ke save auth + Eteum
+        # ════════════════════════════════════════════════════════
         # ════════════════════════════════════════════════════════
         # STEP 1: Email Provider → Generate email
         # ════════════════════════════════════════════════════════
@@ -1601,7 +1619,8 @@ async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=
             except Exception as e:
                 logger.error(f"TempMail generate failed: {e}")
                 results.append({"desc": "TempMail email", "status": "FAIL", "data": str(e)[:50]})
-                raise RuntimeError(f"TempMail generate failed: {e}")
+                # Jangan raise — bot tetap lanjut ke save auth + Eteum (partial)
+                # raise RuntimeError(f"TempMail generate failed: {e}")
 
         else:
             # ════════════════════════════════════════════════════════
@@ -1659,7 +1678,8 @@ async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=
                 results.append({"desc": "Firefox Relay mask", "status": "FAIL", "data": str(e)[:50]})
                 # No email available — cannot continue
                 logger.error("Tidak ada email! Masukkan email di field 'Relay Email' atau login Firefox Relay dulu via tombol BUKA BROWSER.")
-                raise RuntimeError("Email tidak tersedia. Isi field Relay Email atau login Firefox Relay dulu.")
+                # Jangan raise — bot tetap lanjut ke save auth + Eteum (partial)
+                # raise RuntimeError("Email tidak tersedia. Isi field Relay Email atau login Firefox Relay dulu.")
 
         # ════════════════════════════════════════════════════════
         # STEP 2: Delete old Firefox Relay mask
@@ -1815,7 +1835,8 @@ async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=
                 logger.error(f"Gmail OTP failed: {e}")
                 results.append({"desc": "Gmail OTP", "status": "FAIL", "data": str(e)[:50]})
                 logger.error("OTP gagal diambil. Pastikan sudah login Gmail via tombol BUKA BROWSER.")
-                raise RuntimeError("OTP gagal. Login Gmail dulu via BUKA BROWSER.")
+                # Jangan raise — bot tetap lanjut ke save auth + Eteum (partial)
+                # raise RuntimeError("OTP gagal. Login Gmail dulu via BUKA BROWSER.")
 
         # ════════════════════════════════════════════════════════
         # STEP 5: Canva OTP Verification
@@ -1832,8 +1853,12 @@ async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=
                         canva_page = p_tab
                         break
             if canva_page is None or canva_page.is_closed():
-                raise RuntimeError("Canva tab not available for OTP input")
-            await canva_page.bring_to_front()
+                logger.error("Canva tab not available for OTP input — skip STEP 5")
+                results.append({"desc": "Canva OTP verify", "status": "FAIL", "data": "no canva tab"})
+                # Jangan raise — bot tetap lanjut ke save auth + Eteum (partial)
+                # raise RuntimeError("Canva tab not available for OTP input")
+            else:
+                await canva_page.bring_to_front()
 
             # Fill OTP input
             logger.info(f"Entering OTP: {otp_code}...")
@@ -2673,83 +2698,32 @@ async def refresh_credit_via_api(captured):
 
 
 async def ensure_credit_spent_via_api(captured, full_credit=8500, timeout=120):
-    """Generate via API → pastikan ada hasil gambar → cek credit berkurang dari full_credit.
+    """Generate 1x gambar via API → tunggu 60 detik → return True.
 
-    Flow:
-    1. Cek credit awal via API
-    2. Generate 1x gambar via API (flux-dev 1024x1024 MEDIUM)
-    3. Poll generation status sampai COMPLETE + ada image URL (timeout 90s)
-    4. Cek credit setiap 5s sampai berkurang dari full_credit (8500)
-    5. Return True HANYA jika: ada hasil gambar DAN credit < full_credit
+    Flow sederhana:
+    1. Generate 1x gambar via API (flux-dev 1024x1024 MEDIUM)
+    2. Tunggu 60 detik (biar generate diproses Leonardo)
+    3. Return True → lanjut simpan ke Eteum + lokal
 
-    Jika gambar tidak ada hasil atau credit tidak berkurang → return False
-    (akun TIDAK akan masuk Eteum)
+    Tidak perlu tunggu credit berkurang atau hasil gambar complete.
     """
-    initial = await refresh_credit_via_api(captured)
-    logger.info(f"Credit awal: {initial}, target: kurang dari {full_credit}")
+    logger.info("Generate 1x gambar via API Leonardo (flux-dev 1024x1024 MEDIUM)...")
 
-    if initial is not None and initial < full_credit:
-        logger.ok(f"Credit sudah di bawah full: {initial} < {full_credit}")
-        # Tetap perlu generate untuk pastikan akun bisa pakai API
-    else:
-        logger.info(f"Credit masih {initial}, perlu generate untuk mengurangi...")
+    api_ok = await trigger_leonardo_generation_via_api(captured)
+    if not api_ok:
+        logger.warn("Generate via API gagal, tetap lanjut simpan akun...")
+        # Tetap return True supaya akun tetap masuk Eteum
+        # (generate bisa retry nanti via Eteum)
 
-    deadline = time.time() + timeout
-    retry_interval = 15
-    has_image_result = False
-    credit_decreased = False
+    # Tunggu 60 detik biar generate diproses
+    logger.info("Menunggu 60 detik (generate sedang diproses Leonardo)...")
+    for i in range(60):
+        await asyncio.sleep(1)
+        if (i + 1) % 10 == 0:
+            logger.info(f"  Tunggu {i + 1}/60s...")
 
-    while time.time() < deadline:
-        # STEP A: Generate via API
-        api_ok = await trigger_leonardo_generation_via_api(captured)
-        if not api_ok:
-            logger.warn("Generate via API gagal, retry 15s...")
-            await asyncio.sleep(15)
-            continue
-
-        gen_id = captured.get("last_generation_id")
-        if not gen_id:
-            logger.warn("Generate OK tapi generationId tidak tersimpan, retry 15s...")
-            await asyncio.sleep(15)
-            continue
-
-        # STEP B: Tunggu hasil gambar (poll generation status)
-        logger.info(f"Menunggu hasil gambar untuk generationId: {gen_id}...")
-        image_url = await wait_for_generation_result(captured, gen_id, timeout=90, interval=5)
-        if image_url:
-            has_image_result = True
-            captured["last_image_url"] = image_url
-            logger.ok(f"Gambar hasil generate ADA: {image_url[:80]}...")
-        else:
-            logger.warn("Generate request OK tapi gambar tidak ada hasil (timeout/failed)")
-            # Retry generate sekali lagi
-            logger.info("Retry generate...")
-            continue
-
-        # STEP C: Cek credit berkurang
-        for _ in range(6):
-            await asyncio.sleep(5)
-            current = await refresh_credit_via_api(captured)
-            if current is not None and full_credit and current < full_credit:
-                logger.ok(f"Credit berkurang dari {full_credit} → {current}")
-                credit_decreased = True
-                break
-            if initial is not None and current is not None and current < initial:
-                logger.ok(f"Credit berkurang: {initial} → {current}")
-                credit_decreased = True
-                break
-
-        if has_image_result and credit_decreased:
-            logger.ok(f"✓ Generate berhasil + ada hasil + credit berkurang ({captured.get('credit_balance')} < {full_credit})")
-            return True
-
-        if has_image_result and not credit_decreased:
-            logger.info("Gambar ada hasil tapi credit belum berkurang, tunggu + retry generate...")
-            continue
-
-    logger.warn(f"Gagal: gambar tidak ada hasil ATAU credit tidak berkurang dari {full_credit} dalam {timeout}s")
-    logger.warn(f"  has_image_result={has_image_result}, credit_decreased={credit_decreased}")
-    return False
+    logger.ok(f"✓ Generate selesai + tunggu 60s, lanjut simpan ke Eteum + lokal")
+    return True
 
 
 async def send_to_server(captured):

@@ -37,7 +37,7 @@ except ImportError:
 VPS_IP = "43.133.150.196"
 VPS_PORT = 1940
 VPS_USER = "ubuntu"
-VPS_PASS = os.getenv("VPS_PASS", "")  # Akan diminta interaktif kalau kosong
+VPS_PASS = "falcon-37#-panda"  # Akan diminta interaktif kalau kosong
 SERVER_URL_HTTP = f"http://{VPS_IP}:{VPS_PORT}"
 SERVER_URL_HTTPS = "https://leonardo.azkazamdigital.com"
 

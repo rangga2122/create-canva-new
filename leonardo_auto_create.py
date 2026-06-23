@@ -1991,7 +1991,7 @@ async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=
 def extract_canva_cookies(browser_cookies):
     """Extract cookies Canva dari browser context untuk Eteum Pool."""
     # Canva cookies pakai UPPERCASE (CAZ, CB, CAU) — normalisasi ke lowercase
-    canva_keys = {"caz", "cb", "cau", "user_id", "cid", "cui", "cul", "cdi", "cs", "cl", "cf_clearance"}
+    canva_keys = {"caz", "cb", "cau", "ctc", "user_id", "cid", "cui", "cul", "cdi", "cs", "cl", "cf_clearance"}
     tokens = {}
     all_canva = []
     canva_domains_found = set()
@@ -2013,6 +2013,22 @@ def extract_canva_cookies(browser_cookies):
 
     tokens["all_cookies"] = all_canva
 
+    # Extract user_id dari CAU cookie (base64-encoded JSON: {"A":"UAHNX5XDJOY","B":"BAGc0ykFxGs"})
+    # Ini WAJIB — Canva API butuh x-canva-user header, tanpa itu = 403 Forbidden
+    if not tokens.get("user_id") and tokens.get("cau"):
+        try:
+            import base64
+            cau_val = tokens["cau"]
+            # Pad base64
+            padded = cau_val + "=" * (4 - len(cau_val) % 4) if len(cau_val) % 4 else cau_val
+            decoded = json.loads(base64.b64decode(padded))
+            user_id = decoded.get("A", "")
+            if user_id:
+                tokens["user_id"] = user_id
+                logger.ok(f"Extracted user_id from CAU: {user_id}")
+        except Exception as e:
+            logger.warn(f"Gagal extract user_id dari CAU: {e}")
+
     # Debug logging
     if not tokens.get("caz"):
         logger.warn(f"caz NOT found. Canva domains: {canva_domains_found or 'NONE'}")
@@ -2022,6 +2038,8 @@ def extract_canva_cookies(browser_cookies):
             logger.info(f"Canva cookie names: {canva_names[:30]}")
     else:
         logger.ok(f"Canva cookies found: {list(tokens.keys())}")
+        if not tokens.get("user_id"):
+            logger.warn("user_id missing — Canva API akan return 403!")
 
     return tokens if tokens.get("caz") else None
 

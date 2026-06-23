@@ -1990,7 +1990,8 @@ async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=
 
 def extract_canva_cookies(browser_cookies):
     """Extract cookies Canva dari browser context untuk Eteum Pool."""
-    canva_keys = ["caz", "cb", "cau", "user_id", "cid", "cui", "cul", "cdi", "cs", "cl", "cf_clearance"]
+    # Canva cookies pakai UPPERCASE (CAZ, CB, CAU) — normalisasi ke lowercase
+    canva_keys = {"caz", "cb", "cau", "user_id", "cid", "cui", "cul", "cdi", "cs", "cl", "cf_clearance"}
     tokens = {}
     all_canva = []
     canva_domains_found = set()
@@ -1999,14 +2000,16 @@ def extract_canva_cookies(browser_cookies):
     for c in browser_cookies or []:
         domain = (c.get("domain") or "").lower()
         name = c.get("name", "")
+        name_lower = name.lower()
         all_cookie_names.append(f"{name}@{domain}")
         # Match berbagai format domain Canva: canva.com, .canva.com, www.canva.com
         if "canva.com" not in domain:
             continue
         canva_domains_found.add(domain)
         all_canva.append(c)
-        if name in canva_keys:
-            tokens[name] = c.get("value", "")
+        # Case-insensitive match — normalisasi ke lowercase
+        if name_lower in canva_keys:
+            tokens[name_lower] = c.get("value", "")
 
     tokens["all_cookies"] = all_canva
 
@@ -2017,13 +2020,8 @@ def extract_canva_cookies(browser_cookies):
         if all_canva:
             canva_names = [c.get("name", "") for c in all_canva]
             logger.info(f"Canva cookie names: {canva_names[:30]}")
-        else:
-            # Cari cookies dengan domain yang mungkin Canva tapi tidak match
-            maybe_canva = [n for n in all_cookie_names if "canva" in n.lower() or "caz" in n.lower()]
-            if maybe_canva:
-                logger.info(f"Maybe Canva cookies: {maybe_canva[:10]}")
-            else:
-                logger.info(f"Sample cookie names: {all_cookie_names[:15]}")
+    else:
+        logger.ok(f"Canva cookies found: {list(tokens.keys())}")
 
     return tokens if tokens.get("caz") else None
 

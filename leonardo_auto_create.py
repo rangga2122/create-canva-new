@@ -78,6 +78,7 @@ SERVER_URL_HTTPS = "https://leonardo.azkazamdigital.com"
 SERVER_BEARER_IMPORT_URL = f"{SERVER_URL_HTTPS}/api/bearer/import"
 
 # Eteum Pool — auto-import Canva account
+SCRIPT_DIR = Path(__file__).parent
 ETTEUM_HOST = os.getenv("ETTEUM_HOST", "43.133.150.196")
 ETTEUM_PORT = int(os.getenv("ETTEUM_PORT", "1930"))
 ETTEUM_API_KEY = os.getenv("ETTEUM_API_KEY", "Nr201105")
@@ -116,7 +117,6 @@ TEMP_MAIL_PREFERRED_DOMAINS = [
 ]
 
 # File paths
-SCRIPT_DIR = Path(__file__).parent
 AUTH_FILE = SCRIPT_DIR / "leonardo_auth.json"
 ACCOUNTS_FILE = SCRIPT_DIR / "leonardo_accounts.json"
 ACCOUNT_AUTH_DIR = SCRIPT_DIR / "auth_accounts"

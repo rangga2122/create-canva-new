@@ -1,0 +1,9 @@
+.installed
+browser_profile/
+logs/
+leonardo_auth.json
+leonardo_dashboard.png
+__pycache__/
+*.pyc
+.venv/
+venv/

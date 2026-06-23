@@ -1322,6 +1322,22 @@ async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=
         logger.step(1, "Firefox Relay — Generate Email Mask")
         print_step_header(1, "Firefox Relay — Generate Email Mask")
 
+        # ════════════════════════════════════════════════════════
+        # CLEAR CANVA COOKIES — hanya di awal, sebelum login Canva
+        # (cookies Canva akan dipertahankan setelah login untuk Eteum Pool)
+        # ════════════════════════════════════════════════════════
+        try:
+            logger.info("Clear Canva cookies (sebelum login)...")
+            for domain in ["canva.com", ".canva.com", "www.canva.com", "www.canva.com/id_id/"]:
+                try:
+                    await browser.clear_cookies(domain=domain)
+                except Exception:
+                    pass
+            logger.ok("Canva cookies cleared (awal)")
+        except Exception as e:
+            logger.warn(f"Failed to clear Canva cookies (awal): {e}")
+
+
         if relay_email:
             # Skip relay, pakai email yang sudah ada
             captured["email"] = relay_email
@@ -1696,18 +1712,14 @@ async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=
             results.append({"desc": "Leonardo login", "status": "FAIL", "data": str(e)[:50]})
 
         # ════════════════════════════════════════════════════════
-        # STEP 8: Remove Canva Cookies + Capture Auth
+        # STEP 8: Capture Auth (Canva cookies DIPERTAHANKAN untuk Eteum)
         # ════════════════════════════════════════════════════════
-        logger.step(8, "Remove Canva Cookies + Capture Auth")
-        print_step_header(8, "Remove Canva Cookies + Capture Auth")
+        logger.step(8, "Capture Auth")
+        print_step_header(8, "Capture Auth")
 
         try:
-            logger.info("Removing Canva cookies...")
-            try:
-                await remove_canva_cookies(browser)
-                logger.ok("Canva cookies cleared successfully")
-            except Exception as e:
-                logger.warn(f"Failed to clear Canva cookies: {e}")
+            # NOTE: Canva cookies TIDAK di-clear — akan dipakai untuk import ke Eteum Pool
+            # Clear cookies Canva hanya dilakukan di awal (sebelum login Canva)
 
             # Capture cookies
             cookies = await browser.cookies()
@@ -1861,18 +1873,8 @@ async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=
             if not captured["access_token"] and has_captured_auth(captured):
                 logger.info("Bearer token not found, using Leonardo cookie session auth")
 
-            # Remove Canva cookies (cleanup)
-            logger.info("Removing Canva cookies...")
-            try:
-                # Clear using playwright API for multiple canva domains
-                for domain in ["canva.com", ".canva.com", "www.canva.com", "www.canva.com/id_id/"]:
-                    try:
-                        await browser.clear_cookies(domain=domain)
-                    except Exception as ce:
-                        logger.info(f"  Failed clear_cookies for {domain}: {ce}")
-                logger.ok("Canva cookies cleared successfully")
-            except Exception as e:
-                logger.warn(f"Failed to clear Canva cookies: {e}")
+            # NOTE: Canva cookies TIDAK di-clear — akan dipakai untuk import ke Eteum Pool
+            # Clear cookies Canva hanya dilakukan di awal (sebelum login Canva)
 
             normalize_captured_auth(captured)
 
@@ -1891,19 +1893,19 @@ async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=
             results.append({"desc": "Capture auth", "status": "FAIL", "data": str(e)[:50]})
 
         # ════════════════════════════════════════════════════════════
-        # GENERATE VIA BROWSER UI — pemandangan indah
+        # GENERATE VIA API — flux-dev 1024x1024 MEDIUM (sama dengan leonardo.azkazamdigital)
         # ════════════════════════════════════════════════════════════
         if has_complete_leonardo_auth(captured):
-            logger.info("Generate image via browser UI untuk verify credit berkurang...")
+            logger.info("Generate image via API Leonardo untuk verify credit berkurang...")
             try:
-                spend_ok = await ensure_credit_spent_via_browser(leo_page, captured, full_credit=8500, timeout=120)
+                spend_ok = await ensure_credit_spent_via_api(captured, full_credit=8500, timeout=120)
                 results.append({
-                    "desc": "Leonardo credit spent (browser UI)",
+                    "desc": "Leonardo credit spent (API)",
                     "status": "OK" if spend_ok else "FAIL",
                     "data": str(captured.get("credit_balance")),
                 })
             except Exception as e:
-                logger.warn(f"Browser UI generate skipped: {e}")
+                logger.warn(f"API generate skipped: {e}")
 
         # ════════════════════════════════════════════════════════════
         # CAPTURE CANVA COOKIES — untuk Eteum Pool
@@ -2090,131 +2092,205 @@ def save_canva_account_local(captured):
 # GENERATE VIA BROWSER UI
 # ════════════════════════════════════════════════════════════
 
-async def generate_via_browser_ui(page, prompt="pemandangan indah", timeout=30):
-    """Generate image via Leonardo browser UI dengan selector spesifik.
+# ════════════════════════════════════════════════════════════
+# LEONARDO API: Generate via httpx (gpt-image-2, 1024x1024, medium)
+# Format sama dengan leonardo.azkazamdigital.com (server.py)
+# ════════════════════════════════════════════════════════════
 
-    Selector:
-    - Input prompt: #prompt-textarea
-    - Tombol Generate: [aria-label="Generate"]
+LEONARDO_GRAPHQL_URL = "https://api.leonardo.ai/v1/graphql"
+LEONARDO_REST_GENERATIONS_URL = "https://cloud.leonardo.ai/api/rest/v1/generations"
+LEONARDO_GPT_IMAGE_MODEL = "gpt-image-2"
+
+
+def _build_generation_graphql_payload(prompt):
+    """Build GraphQL mutation payload — flux-dev, 1024x1024, MEDIUM (sama dengan leonardo.azkazamdigital)."""
+    return {
+        "operationName": "Generate",
+        "variables": {
+            "request": {
+                "model": "flux-dev",
+                "public": True,
+                "parameters": {
+                    "height": 1024,
+                    "width": 1024,
+                    "prompt_enhance": "AUTO",
+                    "quality": "MEDIUM",
+                    "quantity": 1,
+                    "style_ids": ["111dc692-d470-4eec-b791-3475abac4c46"],
+                    "prompt": prompt,
+                },
+            }
+        },
+        "query": "mutation Generate($request: CreateGenerationRequest!) {\n  generate(request: $request) {\n    apiCreditCost\n    generationId\n    __typename\n  }\n}",
+    }
+
+
+def _build_generation_rest_payload(prompt):
+    """Build REST fallback payload — gpt-image-2, 1024x1024."""
+    return {
+        "prompt": prompt,
+        "modelId": LEONARDO_GPT_IMAGE_MODEL,
+        "num_images": 1,
+        "width": 1024,
+        "height": 1024,
+    }
+
+
+def _leonardo_api_headers(token):
+    """Headers untuk API Leonardo (sama dengan leonardo.azkazamdigital)."""
+    return {
+        "accept": "*/*",
+        "content-type": "application/json",
+        "authorization": f"Bearer {token}",
+        "origin": "https://app.leonardo.ai",
+        "referer": "https://app.leonardo.ai/",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+        "x-leo-schema-version": "1.185.11",
+        "sec-ch-ua-platform": '"Windows"',
+    }
+
+
+async def trigger_leonardo_generation_via_api(captured):
+    """Generate 1x gambar via httpx langsung ke API Leonardo (tanpa browser).
+
+    Menggunakan format yang terbukti berhasil di leonardo.azkazamdigital.com:
+    flux-dev, 1024x1024, MEDIUM, CreateGenerationRequest!, generate mutation.
     """
-    if not page or page.is_closed():
-        logger.warn("Page tertutup, tidak bisa generate via UI")
+    token = captured.get("access_token")
+    if not token:
+        logger.warn("Bearer token belum tersedia, tidak bisa generate via API")
         return False
+
+    prompt = f"pemandangan indah {int(time.time())}"
+    logger.info("Generate gambar via API Leonardo (flux-dev 1024x1024 MEDIUM)...")
+
+    headers = _leonardo_api_headers(token)
+    graphql_payload = _build_generation_graphql_payload(prompt)
 
     try:
-        logger.info("Navigasi ke Leonardo image-generation...")
-        await page.goto("https://app.leonardo.ai/image-generation", wait_until="domcontentloaded", timeout=25000)
-        await asyncio.sleep(5)
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(LEONARDO_GRAPHQL_URL, json=graphql_payload, headers=headers)
+            body = resp.text
+            logger.info(f"Response generate API: {resp.status_code} | {body[:300]}")
 
-        # === INPUT PROMPT ===
-        logger.info("Mencari selector #prompt-textarea...")
-        try:
-            prompt_loc = page.locator("#prompt-textarea").first
-            await prompt_loc.wait_for(state="visible", timeout=15000)
-            logger.ok("Selector #prompt-textarea ditemukan")
-            await prompt_loc.click()
-            await asyncio.sleep(0.5)
-            await prompt_loc.fill("")
-            await asyncio.sleep(0.3)
-            await prompt_loc.type(prompt, delay=30)
-            await asyncio.sleep(1)
-            logger.ok(f"Prompt diisi: '{prompt}'")
-        except Exception as e:
-            logger.warn(f"Selector #prompt-textarea tidak ditemukan: {e}")
-            try:
-                fallback = page.locator("textarea").first
-                await fallback.wait_for(state="visible", timeout=5000)
-                await fallback.click()
-                await fallback.fill("")
-                await fallback.type(prompt, delay=30)
-                await asyncio.sleep(1)
-                logger.ok(f"Prompt diisi via fallback textarea: '{prompt}'")
-            except Exception as e2:
-                logger.error(f"Fallback textarea juga gagal: {e2}")
-                return False
-
-        # === KLIK GENERATE ===
-        logger.info("Mencari tombol [aria-label='Generate']...")
-        try:
-            gen_btn = page.locator('[aria-label="Generate"]').first
-            await gen_btn.wait_for(state="visible", timeout=10000)
-
-            is_disabled = await gen_btn.get_attribute("disabled")
-            aria_disabled = await gen_btn.get_attribute("aria-disabled")
-            if is_disabled is not None or aria_disabled == "true":
-                logger.warn("Tombol Generate disabled, tunggu 3s lalu retry...")
-                await asyncio.sleep(3)
+            if resp.status_code == 200:
                 try:
-                    await gen_btn.click(force=True, timeout=5000)
-                    logger.ok("Tombol Generate diklik (force)")
-                    await asyncio.sleep(3)
-                    return True
+                    data = resp.json()
+                    gen_data = (data.get("data") or {}).get("generate")
+                    errors = data.get("errors")
+                    if gen_data and gen_data.get("generationId"):
+                        logger.ok(f"Generate berhasil! generationId: {gen_data['generationId']}, credit cost: {gen_data.get('apiCreditCost', '?')}")
+                        return True
+                    elif errors:
+                        logger.warn(f"Generate gagal (GraphQL errors): {errors[0].get('message', '')[:200]}")
+                    else:
+                        logger.warn(f"Generate response tidak ada generationId: {body[:300]}")
                 except Exception:
-                    logger.error("Tombol Generate masih disabled")
-                    return False
+                    logger.warn(f"Generate response bukan JSON valid: {body[:200]}")
+            else:
+                logger.warn(f"Generate gagal: HTTP {resp.status_code}")
 
-            await gen_btn.click(timeout=5000)
-            logger.ok("Tombol Generate diklik!")
-            await asyncio.sleep(3)
-            return True
-
-        except Exception as e:
-            logger.warn(f"Selector [aria-label='Generate'] tidak ditemukan: {e}")
-            try:
-                buttons = page.locator('button, [role="button"]')
-                count = await buttons.count()
-                for i in range(count):
-                    btn = buttons.nth(i)
-                    text = (await btn.inner_text() or "").strip().lower()
-                    if "generate" in text or "buat" in text:
-                        rect = await btn.bounding_box()
-                        if rect and rect["width"] > 60 and rect["height"] > 25:
-                            await btn.click(timeout=5000)
-                            logger.ok(f"Tombol Generate diklik via fallback text: '{text}'")
-                            await asyncio.sleep(3)
-                            return True
-                logger.error("Tombol Generate tidak ditemukan di semua fallback")
-                return False
-            except Exception as e2:
-                logger.error(f"Fallback button text juga gagal: {e2}")
-                return False
+            # Fallback: REST endpoint dengan gpt-image-2
+            logger.info("Fallback: REST endpoint dengan gpt-image-2...")
+            rest_payload = _build_generation_rest_payload(prompt)
+            resp2 = await client.post(LEONARDO_REST_GENERATIONS_URL, json=rest_payload, headers=headers)
+            logger.info(f"Response REST fallback: {resp2.status_code} | {resp2.text[:300]}")
+            if resp2.status_code == 200:
+                logger.ok("Generate via REST fallback berhasil!")
+                return True
 
     except Exception as e:
-        logger.error(f"Generate via browser UI gagal: {type(e).__name__}: {e}")
-        return False
+        logger.warn(f"Generate via API gagal: {e}")
+
+    return False
 
 
-async def ensure_credit_spent_via_browser(page, captured, full_credit=8500, timeout=120):
-    """Generate via browser UI lalu tunggu credit berkurang."""
-    initial = captured.get("credit_balance")
+async def refresh_credit_via_api(captured):
+    """Cek saldo credit Leonardo via httpx langsung (tanpa browser)."""
+    token = captured.get("access_token")
+    if not token:
+        return None
+
+    headers = _leonardo_api_headers(token)
+
+    credit_query = {
+        "operationName": "CurrentUserCredits",
+        "variables": {},
+        "query": """query CurrentUserCredits {
+  users {
+    id
+    user_details {
+      subscriptionTokens
+      paidTokens
+      rolloverTokens
+      apiCredit
+      streamTokens
+    }
+  }
+}""",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(LEONARDO_GRAPHQL_URL, json=credit_query, headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                credits = extract_credit_balance(data) if "extract_credit_balance" in globals() else None
+                if credits is not None:
+                    captured["credit_balance"] = credits
+                    logger.ok(f"Saldo credit: {credits}")
+                    return credits
+                # Manual extract jika fungsi tidak ada
+                users = (data.get("data") or {}).get("users") or []
+                if users:
+                    details = users[0].get("user_details") or {}
+                    total = (details.get("subscriptionTokens") or 0) + (details.get("paidTokens") or 0) + (details.get("rolloverTokens") or 0) + (details.get("apiCredit") or 0)
+                    captured["credit_balance"] = total
+                    logger.ok(f"Saldo credit: {total}")
+                    return total
+    except Exception as e:
+        logger.info(f"Cek credit via API gagal: {e}")
+
+    return None
+
+
+async def ensure_credit_spent_via_api(captured, full_credit=8500, timeout=120):
+    """Generate via API lalu tunggu credit berkurang.
+
+    1. Cek credit awal via API
+    2. Generate 1x gambar via API (flux-dev 1024x1024 MEDIUM)
+    3. Cek credit setiap 5s, retry generate setiap 15s sampai berkurang
+    """
+    initial = await refresh_credit_via_api(captured)
     logger.info(f"Credit awal: {initial}, target: kurang dari {full_credit}")
 
-    ui_ok = await generate_via_browser_ui(page, prompt="pemandangan indah")
-    if not ui_ok:
-        logger.warn("Generate via browser UI gagal")
+    if initial is not None and initial < full_credit:
+        logger.ok(f"Credit sudah di bawah full: {initial} < {full_credit}")
+        return True
 
     deadline = time.time() + timeout
     retry_interval = 15
-    last_retry = time.time()
+    last_retry = 0
 
     while time.time() < deadline:
-        await refresh_credit_via_api(captured) if "refresh_credit_via_api" in globals() else None
-        current = captured.get("credit_balance")
+        api_ok = await trigger_leonardo_generation_via_api(captured)
+        if not api_ok:
+            logger.warn("Generate via API gagal, retry 15s...")
+            await asyncio.sleep(15)
+            continue
 
-        if initial is not None and current is not None and current < initial:
-            logger.ok(f"Credit berkurang: {initial} -> {current}")
-            return True
-        if current is not None and full_credit and current < full_credit:
-            logger.ok(f"Credit di bawah full: {current} < {full_credit}")
-            return True
+        # Tunggu credit berkurang
+        for _ in range(6):
+            await asyncio.sleep(5)
+            current = await refresh_credit_via_api(captured)
+            if initial is not None and current is not None and current < initial:
+                logger.ok(f"Credit berkurang: {initial} -> {current}")
+                return True
+            if current is not None and full_credit and current < full_credit:
+                logger.ok(f"Credit di bawah full: {current} < {full_credit}")
+                return True
 
-        if time.time() - last_retry >= retry_interval:
-            logger.info(f"Credit belum berkurang ({current}), retry generate via browser UI...")
-            ui_ok = await generate_via_browser_ui(page, prompt="pemandangan indah")
-            last_retry = time.time()
-        else:
-            logger.info(f"Credit belum berkurang ({current}), tunggu 5s...")
-        await asyncio.sleep(5)
+        logger.info(f"Credit belum berkurang ({captured.get('credit_balance')}), retry generate...")
 
     logger.warn(f"Credit belum berkurang dari {full_credit}; generate gagal")
     return False

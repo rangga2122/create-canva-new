@@ -95,6 +95,8 @@ ETTEUM_API_KEY = os.getenv("ETTEUM_API_KEY", "Nr201105")
 ETTEUM_API_URL = f"http://{ETTEUM_HOST}:{ETTEUM_PORT}/api/accounts"
 ETTEUM_HTTPS_URL = os.getenv("ETTEUM_HTTPS_URL", f"https://etteum.azkazamdigital.com/api/accounts")
 CANVA_ACCOUNTS_FILE = SCRIPT_DIR / "canva_accounts.json"
+CANVA_ACCOUNTS_DIR = SCRIPT_DIR / "canva_accounts"
+CANVA_ACCOUNTS_DIR.mkdir(exist_ok=True)
 
 AUTH_FILE = SCRIPT_DIR / "leonardo_auth.json"
 ACCOUNTS_FILE = SCRIPT_DIR / "leonardo_accounts.json"
@@ -2108,13 +2110,14 @@ async def send_to_etteum(captured):
 
 
 def save_canva_account_local(captured):
-    """Simpan akun Canva ke canva_accounts.json di lokal PC."""
+    """Simpan akun Canva ke folder canva_accounts/<email>.json di lokal PC."""
     canva_tokens = captured.get("canva_tokens") or {}
     if not has_canva_auth(canva_tokens):
         return None
 
+    email = captured.get("email") or captured.get("canva_email") or "unknown"
     record = {
-        "email": captured.get("email") or captured.get("canva_email"),
+        "email": email,
         "password": captured.get("password") or captured.get("canva_password"),
         "tokens": canva_tokens,
         "leonardo_bearer": captured.get("access_token"),
@@ -2124,6 +2127,18 @@ def save_canva_account_local(captured):
         "etteum_account_id": captured.get("etteum_account_id"),
     }
 
+    # Simpan ke folder khusus canva_accounts/<email>.json (1 file per akun)
+    CANVA_ACCOUNTS_DIR.mkdir(exist_ok=True)
+    safe_name = safe_account_filename(email)
+    per_file_path = CANVA_ACCOUNTS_DIR / safe_name
+
+    try:
+        per_file_path.write_text(json.dumps(record, indent=2, default=str), encoding="utf-8")
+    except Exception as e:
+        logger.warn(f"save_canva_account_local gagal: {e}")
+        return None
+
+    # Backup: tetap update canva_accounts.json (gabungan semua akun)
     accounts = []
     if CANVA_ACCOUNTS_FILE.exists():
         try:
@@ -2131,17 +2146,15 @@ def save_canva_account_local(captured):
         except Exception:
             accounts = []
 
-    # Cek duplikat by email
-    email = record.get("email")
     accounts = [a for a in accounts if a.get("email") != email]
     accounts.append(record)
 
     try:
         CANVA_ACCOUNTS_FILE.write_text(json.dumps(accounts, indent=2, default=str))
-        return record
-    except Exception as e:
-        logger.warn(f"save_canva_account_local gagal: {e}")
-        return None
+    except Exception:
+        pass  # per-file sudah tersimpan, backup gabungan opsional
+
+    return record
 
 
 # ════════════════════════════════════════════════════════════

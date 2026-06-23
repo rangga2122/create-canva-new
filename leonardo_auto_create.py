@@ -371,7 +371,7 @@ def extract_credit_balance(payload):
                         continue
                     total = 0
                     found_token_field = False
-                    # Include apiCredit — akun baru Leonardo pakai apiCredit (850), bukan subscription
+                    # Include apiCredit — akun baru Leonardo pakai apiCredit (8500), bukan subscription
                     for token_key in ["subscriptionTokens", "paidTokens", "rolloverTokens", "apiCredit", "streamTokens"]:
                         number = as_number(detail.get(token_key))
                         if number is not None:
@@ -2143,10 +2143,10 @@ async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=
                         credits = profile.get("credit_balance") or profile.get("credits") or profile.get("user", {}).get("credit_balance")
                         captured["credit_balance"] = credits
                         if credits is not None:
-                            if credits >= 850:
-                                logger.ok(f"Credit balance: {credits} ✅ (≥ 850)")
+                            if credits >= 8500:
+                                logger.ok(f"Credit balance: {credits} ✅ (≥ 8500)")
                             else:
-                                logger.warn(f"Credit balance: {credits} ⚠️ (< 850)")
+                                logger.warn(f"Credit balance: {credits} ⚠️ (< 8500)")
                 except Exception as e:
                     logger.warn(f"Could not check credits via API: {e}")
             if captured.get("credit_balance") is not None:

@@ -182,7 +182,7 @@ class LeonardoGUI(ctk.CTk):
         
         self.email_entry = ctk.CTkEntry(
             input_frame,
-            placeholder_text="kosongkan untuk auto-generate dari Firefox Relay",
+            placeholder_text="kosongkan untuk auto-generate (Relay atau TempMail)",
             font=FONT_BODY,
             fg_color=COLOR_ENTRY,
             border_color=COLOR_ACCENT,
@@ -190,6 +190,40 @@ class LeonardoGUI(ctk.CTk):
             height=40
         )
         self.email_entry.pack(fill="x", pady=(2, 0))
+
+        # Email Provider selector — Relay atau TempMail
+        provider_label = ctk.CTkLabel(
+            input_frame,
+            text="Email Provider:",
+            font=FONT_SMALL,
+            text_color=COLOR_TEXT_DIM
+        )
+        provider_label.pack(anchor="w", pady=(10, 2))
+
+        provider_row = ctk.CTkFrame(input_frame, fg_color="transparent")
+        provider_row.pack(fill="x", pady=(0, 5))
+
+        self.email_provider_var = ctk.StringVar(value="relay")
+
+        self.relay_radio = ctk.CTkRadioButton(
+            provider_row,
+            text="Firefox Relay + Gmail OTP",
+            variable=self.email_provider_var,
+            value="relay",
+            font=FONT_SMALL,
+            text_color=COLOR_TEXT,
+        )
+        self.relay_radio.pack(side="left", padx=(0, 15))
+
+        self.tempmail_radio = ctk.CTkRadioButton(
+            provider_row,
+            text="TempMail API (mail.digitalku.store)",
+            variable=self.email_provider_var,
+            value="tempmail",
+            font=FONT_SMALL,
+            text_color=COLOR_TEXT,
+        )
+        self.tempmail_radio.pack(side="left")
 
         target_row = ctk.CTkFrame(input_frame, fg_color="transparent")
         target_row.pack(fill="x", pady=(10, 0))
@@ -825,6 +859,7 @@ class LeonardoGUI(ctk.CTk):
         
         mode = self.mode_var.get()
         relay_email = self.email_entry.get().strip() or None
+        email_provider = self.email_provider_var.get()
         try:
             target_accounts = int((self.target_entry.get() or "1").strip())
         except ValueError:
@@ -835,18 +870,19 @@ class LeonardoGUI(ctk.CTk):
         
         self.log("=" * 50, "info")
         self.log(f"Memulai mode: {mode.upper()}", "step")
+        self.log(f"Email provider: {email_provider.upper()}", "info")
         self.log(f"Target akun: {target_accounts}", "info")
         self.batch_label.configure(text=f"Akun jadi: 0 / {target_accounts}", text_color=COLOR_TEXT)
         if relay_email:
             self.log(f"Email: {relay_email}", "info")
             if target_accounts > 1:
-                self.log("Email manual hanya dipakai untuk akun pertama; akun berikutnya auto-generate Relay.", "warn")
+                self.log("Email manual hanya dipakai untuk akun pertama; akun berikutnya auto-generate.", "warn")
         self.log("=" * 50, "info")
         
         # Run in background thread
         self.log_thread = threading.Thread(
             target=self._run_automation,
-            args=(mode, relay_email, target_accounts),
+            args=(mode, relay_email, target_accounts, email_provider),
             daemon=True
         )
         self.log_thread.start()
@@ -860,7 +896,7 @@ class LeonardoGUI(ctk.CTk):
         self.browser_btn.configure(state="normal")
         self.step_label.configure(text="\u23f9 Dihentikan", text_color=COLOR_WARN)
         
-    def _run_automation(self, mode, relay_email, target_accounts=1):
+    def _run_automation(self, mode, relay_email, target_accounts=1, email_provider="relay"):
         """Run automation in background thread"""
         try:
             # Patch logger to send to GUI
@@ -917,7 +953,11 @@ class LeonardoGUI(ctk.CTk):
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     captured, results = loop.run_until_complete(
-                        lac.auto_create_account(headless=headless, relay_email=current_relay_email)
+                        lac.auto_create_account(
+                            headless=headless,
+                            relay_email=current_relay_email,
+                            email_provider=email_provider,
+                        )
                     )
                     loop.close()
 

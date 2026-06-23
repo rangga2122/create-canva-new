@@ -1239,16 +1239,19 @@ async def reset_leonardo_session(browser):
     logger.ok("Leonardo cookies/storage reset done")
 
 
-async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=True):
+async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=True, email_provider="relay"):
     """
     Full automated flow:
-    1. Firefox Relay → generate mask email
-    2. Canva signup with mask
-    3. Gmail → OTP
+    1. Email provider → generate email (Firefox Relay or TempMail)
+    2. Canva signup with email
+    3. OTP retrieval (Gmail for Relay, TempMail API for TempMail)
     4. Canva OTP verify
     5. Accept team invite
     6. Leonardo login via Canva SSO
     7. Capture auth
+
+    Args:
+        email_provider: "relay" (Firefox Relay + Gmail OTP) or "tempmail" (TempMail API)
     """
     results = []
     captured = {
@@ -1320,10 +1323,11 @@ async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=
             logger.warn(f"Leonardo startup reset failed, continuing anyway: {e}")
 
         # ════════════════════════════════════════════════════════
-        # STEP 1: Firefox Relay → Generate email mask
+        # STEP 1: Email Provider → Generate email
         # ════════════════════════════════════════════════════════
-        logger.step(1, "Firefox Relay — Generate Email Mask")
-        print_step_header(1, "Firefox Relay — Generate Email Mask")
+        step1_title = "TempMail API — Generate Email" if email_provider == "tempmail" else "Firefox Relay — Generate Email Mask"
+        logger.step(1, step1_title)
+        print_step_header(1, step1_title)
 
         # ════════════════════════════════════════════════════════
         # CLEAR CANVA COOKIES — hanya di awal, sebelum login Canva
@@ -1342,11 +1346,34 @@ async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=
 
 
         if relay_email:
-            # Skip relay, pakai email yang sudah ada
+            # Skip email generation, pakai email yang sudah ada
             captured["email"] = relay_email
             logger.ok(f"Using provided email: {relay_email}")
-            results.append({"desc": "Firefox Relay mask", "status": "SKIP", "data": relay_email})
+            results.append({"desc": "Email", "status": "SKIP", "data": relay_email})
+
+        elif email_provider == "tempmail":
+            # ════════════════════════════════════════════════════════
+            # TEMPMAIL MODE — Generate email via mail.digitalku.store API
+            # ════════════════════════════════════════════════════════
+            try:
+                from tempmail_client import generate_email as tempmail_generate
+                logger.info("Generating email via TempMail API...")
+                result = tempmail_generate()
+                if not result.get("success"):
+                    raise RuntimeError(f"TempMail generate failed: {result.get('error')}")
+                temp_email = result["email"]
+                captured["email"] = temp_email
+                logger.ok(f"TempMail email: {temp_email}")
+                results.append({"desc": "TempMail email", "status": "OK", "data": temp_email})
+            except Exception as e:
+                logger.error(f"TempMail generate failed: {e}")
+                results.append({"desc": "TempMail email", "status": "FAIL", "data": str(e)[:50]})
+                raise RuntimeError(f"TempMail generate failed: {e}")
+
         else:
+            # ════════════════════════════════════════════════════════
+            # RELAY MODE — Firefox Relay → generate mask email
+            # ════════════════════════════════════════════════════════
             try:
                 logger.info(f"Opening {FIREFOX_RELAY_URL}...")
                 await page.goto(FIREFOX_RELAY_URL, wait_until="domcontentloaded", timeout=30000)
@@ -1453,88 +1480,117 @@ async def auto_create_account(headless=False, relay_email=None, gmail_logged_in=
             results.append({"desc": "Canva signup", "status": "FAIL", "data": str(e)[:50]})
 
         # ════════════════════════════════════════════════════════
-        # STEP 4: Gmail -> Get OTP
+        # STEP 4: Get OTP (Gmail for Relay, TempMail API for TempMail)
         # ════════════════════════════════════════════════════════
-        logger.step(4, "Gmail - Get OTP from Canva")
-        print_step_header(4, "Gmail - Get OTP from Canva")
+        step4_title = "TempMail API - Get OTP" if email_provider == "tempmail" else "Gmail - Get OTP from Canva"
+        logger.step(4, step4_title)
+        print_step_header(4, step4_title)
 
         otp_code = None
-        try:
-            logger.info(f"Opening Gmail spam folder...")
-            gmail_page = await browser.new_page()
-            await gmail_page.goto(GMAIL_SPAM_URL, wait_until="domcontentloaded", timeout=30000)
-            logger.info("Reloading Gmail before clicking inbox controls...")
-            await gmail_page.reload(wait_until="domcontentloaded", timeout=30000)
-            await delay_ms(5000)
 
-            # Saved workflow clicks Gmail list controls twice after reload.
-            logger.info('Clicking Gmail selector: div[class="asa"] (1/2)')
-            await try_click_workflow_selector(gmail_page, 'div[class="asa"]', timeout=10000)
-            await delay_ms(2000)
-            logger.info('Clicking Gmail selector: div[class="asa"] (2/2)')
-            await try_click_workflow_selector(gmail_page, 'div[class="asa"]', timeout=10000)
-            await delay_ms(3000)
-
-            logger.info("Clicking Gmail inbox row selector: tr.zA")
-            row_otp_text = await click_gmail_canva_row(gmail_page, captured.get("email"), timeout=15000)
-            await delay_ms(2000)
-
-            logger.info('Clicking optional Gmail email selector: span[class="yP"]')
-            await try_click_workflow_selector(gmail_page, 'span[class="yP"]', timeout=5000)
-            logger.ok("Opened Canva email")
-            await delay_ms(2000)
-
-            # Extract OTP code from email body
-            logger.info("Extracting OTP code...")
-            otp_text = row_otp_text or ""
-            
-            # Method 1: td[align="center"] (standard Canva OTP selector)
+        if email_provider == "tempmail" and not relay_email:
+            # ════════════════════════════════════════════════════════
+            # TEMPMAIL MODE — Get OTP via mail.digitalku.store API
+            # ════════════════════════════════════════════════════════
             try:
-                otp_element = gmail_page.locator('td[align="center"]')
-                if await otp_element.count() > 0:
-                    await otp_element.first.wait_for(state="visible", timeout=5000)
-                    otp_text = (await otp_element.first.text_content()) or ""
-                    logger.info(f"OTP Element text: {otp_text}")
-            except:
-                pass
+                from tempmail_client import wait_for_otp as tempmail_wait_for_otp
+                logger.info(f"Waiting for OTP via TempMail API (timeout: 150s)...")
+                otp_code = tempmail_wait_for_otp(
+                    captured["email"],
+                    timeout=150,
+                    poll_interval=5,
+                    sender_filter="canva",
+                )
+                if otp_code:
+                    logger.ok(f"TempMail OTP: {otp_code}")
+                    results.append({"desc": "TempMail OTP", "status": "OK", "data": otp_code})
+                else:
+                    logger.error("TempMail OTP timeout - no OTP received")
+                    results.append({"desc": "TempMail OTP", "status": "FAIL", "data": "timeout"})
+            except Exception as e:
+                logger.error(f"TempMail OTP failed: {e}")
+                results.append({"desc": "TempMail OTP", "status": "FAIL", "data": str(e)[:50]})
+
+        else:
+            # ════════════════════════════════════════════════════════
+            # RELAY MODE — Get OTP from Gmail
+            # ════════════════════════════════════════════════════════
+            try:
+                logger.info(f"Opening Gmail spam folder...")
+                gmail_page = await browser.new_page()
+                await gmail_page.goto(GMAIL_SPAM_URL, wait_until="domcontentloaded", timeout=30000)
+                logger.info("Reloading Gmail before clicking inbox controls...")
+                await gmail_page.reload(wait_until="domcontentloaded", timeout=30000)
+                await delay_ms(5000)
+
+                # Saved workflow clicks Gmail list controls twice after reload.
+                logger.info('Clicking Gmail selector: div[class="asa"] (1/2)')
+                await try_click_workflow_selector(gmail_page, 'div[class="asa"]', timeout=10000)
+                await delay_ms(2000)
+                logger.info('Clicking Gmail selector: div[class="asa"] (2/2)')
+                await try_click_workflow_selector(gmail_page, 'div[class="asa"]', timeout=10000)
+                await delay_ms(3000)
+
+                logger.info("Clicking Gmail inbox row selector: tr.zA")
+                row_otp_text = await click_gmail_canva_row(gmail_page, captured.get("email"), timeout=15000)
+                await delay_ms(2000)
+
+                logger.info('Clicking optional Gmail email selector: span[class="yP"]')
+                await try_click_workflow_selector(gmail_page, 'span[class="yP"]', timeout=5000)
+                logger.ok("Opened Canva email")
+                await delay_ms(2000)
+
+                # Extract OTP code from email body
+                logger.info("Extracting OTP code...")
+                otp_text = row_otp_text or ""
             
-            # Method 2: Fallback to reading the full email body (div.a3s is standard Gmail email body container)
-            if not re.search(r'\b(\d{6})\b', otp_text):
-                logger.info("Standard OTP element not found or invalid. Grabbing full email body content...")
+                # Method 1: td[align="center"] (standard Canva OTP selector)
                 try:
-                    body_element = gmail_page.locator('div.a3s').first
-                    await body_element.wait_for(state="visible", timeout=5000)
-                    otp_text = (await body_element.text_content()) or ""
-                except Exception as be:
-                    logger.warn(f"Failed to read full email body: {be}")
-            
-            # Extract numeric OTP (usually 6 digits)
-            otp_match = re.search(r'\b(\d{6})\b', otp_text or "")
-            if otp_match:
-                otp_code = otp_match.group(1)
-                logger.ok(f"OTP code: {otp_code}")
-                results.append({"desc": "Gmail OTP", "status": "OK", "data": otp_code})
-            else:
-                # Try get full text as OTP
-                otp_code = otp_text.strip()
-                logger.warn(f"OTP extracted (non-standard): {otp_code}")
-                results.append({"desc": "Gmail OTP", "status": "OK", "data": otp_code[:20]})
+                    otp_element = gmail_page.locator('td[align="center"]')
+                    if await otp_element.count() > 0:
+                        await otp_element.first.wait_for(state="visible", timeout=5000)
+                        otp_text = (await otp_element.first.text_content()) or ""
+                        logger.info(f"OTP Element text: {otp_text}")
+                except:
+                    pass
+                
+                # Method 2: Fallback to reading the full email body (div.a3s is standard Gmail email body container)
+                if not re.search(r'\b(\d{6})\b', otp_text):
+                    logger.info("Standard OTP element not found or invalid. Grabbing full email body content...")
+                    try:
+                        body_element = gmail_page.locator('div.a3s').first
+                        await body_element.wait_for(state="visible", timeout=5000)
+                        otp_text = (await body_element.text_content()) or ""
+                    except Exception as be:
+                        logger.warn(f"Failed to read full email body: {be}")
+                
+                # Extract numeric OTP (usually 6 digits)
+                otp_match = re.search(r'\b(\d{6})\b', otp_text or "")
+                if otp_match:
+                    otp_code = otp_match.group(1)
+                    logger.ok(f"OTP code: {otp_code}")
+                    results.append({"desc": "Gmail OTP", "status": "OK", "data": otp_code})
+                else:
+                    # Try get full text as OTP
+                    otp_code = otp_text.strip()
+                    logger.warn(f"OTP extracted (non-standard): {otp_code}")
+                    results.append({"desc": "Gmail OTP", "status": "OK", "data": otp_code[:20]})
 
-            await delay_ms(2000)
-            logger.info('Clicking Gmail post-OTP delete/back selector: .iH .aFi > .Bn')
-            await click_workflow_selector(gmail_page, '.iH .aFi > .Bn', timeout=5000)
-            await delay_ms(3000)
-            try:
-                await gmail_page.close()
-                logger.info("Gmail tab closed after OTP captured")
-            except Exception as ce:
-                logger.info(f"Gmail tab close skipped: {ce}")
+                await delay_ms(2000)
+                logger.info('Clicking Gmail post-OTP delete/back selector: .iH .aFi > .Bn')
+                await click_workflow_selector(gmail_page, '.iH .aFi > .Bn', timeout=5000)
+                await delay_ms(3000)
+                try:
+                    await gmail_page.close()
+                    logger.info("Gmail tab closed after OTP captured")
+                except Exception as ce:
+                    logger.info(f"Gmail tab close skipped: {ce}")
 
-        except Exception as e:
-            logger.error(f"Gmail OTP failed: {e}")
-            results.append({"desc": "Gmail OTP", "status": "FAIL", "data": str(e)[:50]})
-            logger.error("OTP gagal diambil. Pastikan sudah login Gmail via tombol BUKA BROWSER.")
-            raise RuntimeError("OTP gagal. Login Gmail dulu via BUKA BROWSER.")
+            except Exception as e:
+                logger.error(f"Gmail OTP failed: {e}")
+                results.append({"desc": "Gmail OTP", "status": "FAIL", "data": str(e)[:50]})
+                logger.error("OTP gagal diambil. Pastikan sudah login Gmail via tombol BUKA BROWSER.")
+                raise RuntimeError("OTP gagal. Login Gmail dulu via BUKA BROWSER.")
 
         # ════════════════════════════════════════════════════════
         # STEP 5: Canva OTP Verification

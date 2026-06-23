@@ -616,7 +616,9 @@ class LeonardoGUI(ctk.CTk):
                 indicator.configure(text_color=COLOR_TEXT_DIM, fg_color=COLOR_ENTRY)
                 
     def mark_step_done(self, step_num, success=True):
-        """Mark step as done"""
+        """Update step indicator untuk step yang selesai."""
+        if step_num < 1 or step_num > len(self.step_indicators):
+            return  # Guard: step_num di luar range, skip
         indicator = self.step_indicators[step_num - 1]
         if success:
             indicator.configure(text_color=COLOR_SUCCESS, fg_color="#0a3d2a")

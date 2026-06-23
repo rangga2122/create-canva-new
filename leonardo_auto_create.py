@@ -2500,11 +2500,56 @@ def _leonardo_api_headers(token):
     }
 
 
+async def wait_for_generation_result(captured, generation_id, timeout=90, interval=5):
+    """Poll Leonardo REST API sampai generation selesai dan ada image URL.
+
+    GET https://cloud.leonardo.ai/api/rest/v1/generations/{id}
+    Response: { generations_by_pk: { status: "COMPLETE", generated_images: [{ url: "..." }] } }
+    """
+    token = captured.get("access_token")
+    if not token or not generation_id:
+        return None
+
+    headers = _leonardo_api_headers(token)
+    url = f"{LEONARDO_REST_GENERATIONS_URL}/{generation_id}"
+    deadline = time.time() + timeout
+
+    async with httpx.AsyncClient(timeout=30, verify=False) as client:
+        while time.time() < deadline:
+            try:
+                resp = await client.get(url, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    gen = (data.get("generations_by_pk") or {})
+                    status = gen.get("status", "")
+                    images = gen.get("generated_images") or []
+                    if status == "COMPLETE" and images:
+                        image_url = images[0].get("url", "")
+                        if image_url:
+                            logger.ok(f"Generation COMPLETE! Image URL: {image_url[:80]}...")
+                            return image_url
+                    elif status == "FAILED":
+                        logger.warn(f"Generation FAILED status")
+                        return None
+                    else:
+                        logger.info(f"Generation status: {status or 'PENDING'}, tunggu {interval}s...")
+                else:
+                    logger.info(f"Poll generation HTTP {resp.status_code}, retry {interval}s...")
+            except Exception as e:
+                logger.info(f"Poll generation error: {e}, retry {interval}s...")
+            await asyncio.sleep(interval)
+
+    logger.warn(f"Generation tidak complete dalam {timeout}s")
+    return None
+
+
 async def trigger_leonardo_generation_via_api(captured):
     """Generate 1x gambar via httpx langsung ke API Leonardo (tanpa browser).
 
     Menggunakan format yang terbukti berhasil di leonardo.azkazamdigital.com:
     flux-dev, 1024x1024, MEDIUM, CreateGenerationRequest!, generate mutation.
+
+    Return: True jika generate request diterima (generationId ada).
     """
     token = captured.get("access_token")
     if not token:
@@ -2529,7 +2574,9 @@ async def trigger_leonardo_generation_via_api(captured):
                     gen_data = (data.get("data") or {}).get("generate")
                     errors = data.get("errors")
                     if gen_data and gen_data.get("generationId"):
-                        logger.ok(f"Generate berhasil! generationId: {gen_data['generationId']}, credit cost: {gen_data.get('apiCreditCost', '?')}")
+                        gen_id = gen_data["generationId"]
+                        captured["last_generation_id"] = gen_id
+                        logger.ok(f"Generate berhasil! generationId: {gen_id}, credit cost: {gen_data.get('apiCreditCost', '?')}")
                         return True
                     elif errors:
                         logger.warn(f"Generate gagal (GraphQL errors): {errors[0].get('message', '')[:200]}")
@@ -2546,8 +2593,20 @@ async def trigger_leonardo_generation_via_api(captured):
             resp2 = await client.post(LEONARDO_REST_GENERATIONS_URL, json=rest_payload, headers=headers)
             logger.info(f"Response REST fallback: {resp2.status_code} | {resp2.text[:300]}")
             if resp2.status_code == 200:
-                logger.ok("Generate via REST fallback berhasil!")
-                return True
+                try:
+                    rest_data = resp2.json()
+                    # REST return generationsId (bukan generationId)
+                    rest_gen_id = rest_data.get("generationsId") or rest_data.get("generationId") or rest_data.get("sdGenerationJob", {}).get("generationId")
+                    if rest_gen_id:
+                        captured["last_generation_id"] = rest_gen_id
+                        logger.ok(f"Generate via REST fallback berhasil! generationId: {rest_gen_id}")
+                        return True
+                    else:
+                        logger.ok("Generate via REST fallback berhasil (no ID)!")
+                        return True
+                except Exception:
+                    logger.ok("Generate via REST fallback berhasil!")
+                    return True
 
     except Exception as e:
         logger.warn(f"Generate via API gagal: {e}")
@@ -2614,44 +2673,82 @@ async def refresh_credit_via_api(captured):
 
 
 async def ensure_credit_spent_via_api(captured, full_credit=8500, timeout=120):
-    """Generate via API lalu tunggu credit berkurang.
+    """Generate via API → pastikan ada hasil gambar → cek credit berkurang dari full_credit.
 
+    Flow:
     1. Cek credit awal via API
     2. Generate 1x gambar via API (flux-dev 1024x1024 MEDIUM)
-    3. Cek credit setiap 5s, retry generate setiap 15s sampai berkurang
+    3. Poll generation status sampai COMPLETE + ada image URL (timeout 90s)
+    4. Cek credit setiap 5s sampai berkurang dari full_credit (8500)
+    5. Return True HANYA jika: ada hasil gambar DAN credit < full_credit
+
+    Jika gambar tidak ada hasil atau credit tidak berkurang → return False
+    (akun TIDAK akan masuk Eteum)
     """
     initial = await refresh_credit_via_api(captured)
     logger.info(f"Credit awal: {initial}, target: kurang dari {full_credit}")
 
     if initial is not None and initial < full_credit:
         logger.ok(f"Credit sudah di bawah full: {initial} < {full_credit}")
-        return True
+        # Tetap perlu generate untuk pastikan akun bisa pakai API
+    else:
+        logger.info(f"Credit masih {initial}, perlu generate untuk mengurangi...")
 
     deadline = time.time() + timeout
     retry_interval = 15
-    last_retry = 0
+    has_image_result = False
+    credit_decreased = False
 
     while time.time() < deadline:
+        # STEP A: Generate via API
         api_ok = await trigger_leonardo_generation_via_api(captured)
         if not api_ok:
             logger.warn("Generate via API gagal, retry 15s...")
             await asyncio.sleep(15)
             continue
 
-        # Tunggu credit berkurang
+        gen_id = captured.get("last_generation_id")
+        if not gen_id:
+            logger.warn("Generate OK tapi generationId tidak tersimpan, retry 15s...")
+            await asyncio.sleep(15)
+            continue
+
+        # STEP B: Tunggu hasil gambar (poll generation status)
+        logger.info(f"Menunggu hasil gambar untuk generationId: {gen_id}...")
+        image_url = await wait_for_generation_result(captured, gen_id, timeout=90, interval=5)
+        if image_url:
+            has_image_result = True
+            captured["last_image_url"] = image_url
+            logger.ok(f"Gambar hasil generate ADA: {image_url[:80]}...")
+        else:
+            logger.warn("Generate request OK tapi gambar tidak ada hasil (timeout/failed)")
+            # Retry generate sekali lagi
+            logger.info("Retry generate...")
+            continue
+
+        # STEP C: Cek credit berkurang
         for _ in range(6):
             await asyncio.sleep(5)
             current = await refresh_credit_via_api(captured)
-            if initial is not None and current is not None and current < initial:
-                logger.ok(f"Credit berkurang: {initial} -> {current}")
-                return True
             if current is not None and full_credit and current < full_credit:
-                logger.ok(f"Credit di bawah full: {current} < {full_credit}")
-                return True
+                logger.ok(f"Credit berkurang dari {full_credit} → {current}")
+                credit_decreased = True
+                break
+            if initial is not None and current is not None and current < initial:
+                logger.ok(f"Credit berkurang: {initial} → {current}")
+                credit_decreased = True
+                break
 
-        logger.info(f"Credit belum berkurang ({captured.get('credit_balance')}), retry generate...")
+        if has_image_result and credit_decreased:
+            logger.ok(f"✓ Generate berhasil + ada hasil + credit berkurang ({captured.get('credit_balance')} < {full_credit})")
+            return True
 
-    logger.warn(f"Credit belum berkurang dari {full_credit}; generate gagal")
+        if has_image_result and not credit_decreased:
+            logger.info("Gambar ada hasil tapi credit belum berkurang, tunggu + retry generate...")
+            continue
+
+    logger.warn(f"Gagal: gambar tidak ada hasil ATAU credit tidak berkurang dari {full_credit} dalam {timeout}s")
+    logger.warn(f"  has_image_result={has_image_result}, credit_decreased={credit_decreased}")
     return False
 
 
